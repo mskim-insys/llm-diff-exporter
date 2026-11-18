@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import fnmatch
 import os
 import re
 import subprocess
@@ -26,6 +27,7 @@ class FileChange:
     added: int
     removed: int
     binary: bool = False
+    key_path: str = ""
 
 
 def _read_text(path: Path) -> str:
@@ -52,11 +54,74 @@ def _format_path(path: str) -> str:
     return path.replace("\r", "\\r").replace("\n", "\\n")
 
 
+@dataclass
+class Collected:
+    """Changes found for one comparison, before exclusions are applied."""
+
+    mode: str
+    description: str
+    label: str
+    changes: list
+    context: int
+
+
+DEFAULT_EXCLUDES = (
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "poetry.lock",
+    "uv.lock",
+    "Pipfile.lock",
+    "Cargo.lock",
+    "composer.lock",
+    "*.min.js",
+    "*.min.css",
+    "*.map",
+)
+
+
+def _is_excluded(change: FileChange, patterns: Sequence[str], files: Sequence[str]) -> bool:
+    if change.path in files:
+        return True
+    target = (change.key_path or change.path).replace("\\", "/")
+    base = target.rsplit("/", 1)[-1]
+    return any(
+        fnmatch.fnmatch(target, pattern) or fnmatch.fnmatch(base, pattern)
+        for pattern in patterns
+        if pattern
+    )
+
+
+def apply_exclusions(
+    changes: Sequence[FileChange],
+    patterns: Sequence[str] = (),
+    files: Sequence[str] = (),
+) -> tuple[list, list]:
+    """Split changes into (kept, excluded) by glob patterns and exact display paths."""
+    kept = []
+    excluded = []
+    for change in changes:
+        (excluded if _is_excluded(change, patterns, files) else kept).append(change)
+    return kept, excluded
+
+
+def render_collected(
+    collected: Collected,
+    patterns: Sequence[str] = (),
+    files: Sequence[str] = (),
+) -> str:
+    kept, excluded = apply_exclusions(collected.changes, patterns, files)
+    return _build_markdown(
+        collected.mode, collected.description, kept, collected.context, excluded
+    )
+
+
 def _build_markdown(
     mode: str,
     description: str,
     changes: Sequence[FileChange],
     context: int,
+    excluded: Sequence[FileChange] = (),
 ) -> str:
     added = sum(change.added for change in changes)
     removed = sum(change.removed for change in changes)
@@ -72,6 +137,12 @@ def _build_markdown(
         summary.append("- `{}` — {}".format(_format_path(change.path), change.status))
     if any(change.binary for change in changes):
         summary.extend(["", "Binary files are listed above and omitted from the diff body."])
+    if excluded:
+        summary.extend(
+            ["", "Excluded from this export: {}".format(
+                ", ".join("`{}`".format(_format_path(c.path)) for c in excluded)
+            )]
+        )
 
     sections = []
     for change in changes:
@@ -121,12 +192,11 @@ def _build_markdown(
     return result
 
 
-def export_files(
+def collect_files(
     file_a: str | os.PathLike[str],
     file_b: str | os.PathLike[str],
     context: int = 3,
-) -> str:
-    """Return a Markdown diff for two UTF-8 text files."""
+) -> Collected:
     if context < 0:
         raise DiffExportError("Context lines cannot be negative.")
     path_a = Path(file_a)
@@ -149,14 +219,25 @@ def export_files(
         diff=diff,
         added=added,
         removed=removed,
+        key_path=path_b.name,
     )
-    changes = [change] if diff else []
-    return _build_markdown(
+    return Collected(
         "files",
         "{} and {}".format(path_a, path_b),
-        changes,
+        "{}_{}".format(path_a.stem, path_b.stem),
+        [change] if diff else [],
         context,
     )
+
+
+def export_files(
+    file_a: str | os.PathLike[str],
+    file_b: str | os.PathLike[str],
+    context: int = 3,
+    exclude: Sequence[str] = (),
+) -> str:
+    """Return a Markdown diff for two UTF-8 text files."""
+    return render_collected(collect_files(file_a, file_b, context), exclude)
 
 
 def _git(
@@ -242,7 +323,32 @@ def _git_diff_args(
     return args
 
 
-def export_git(
+def list_git_refs(repo_path: str | os.PathLike[str], limit: int = 30) -> dict:
+    """Return recent commits, branches, and tags of a repository (read-only)."""
+    repo = Path(repo_path).resolve()
+    if not repo.is_dir():
+        raise DiffExportError("Repository path is not a directory: {}".format(repo))
+    log = _git(repo, ["log", "-n", str(limit), "--format=%H%x00%h%x00%s%x00%cs"])
+    commits = []
+    for line in log.decode("utf-8", errors="replace").splitlines():
+        parts = line.split("\0")
+        if len(parts) == 4:
+            commits.append(
+                {"hash": parts[0], "short": parts[1], "subject": parts[2], "date": parts[3]}
+            )
+
+    def names(pattern: str) -> list:
+        out = _git(repo, ["for-each-ref", "--format=%(refname:short)", pattern])
+        return [n for n in out.decode("utf-8", errors="replace").splitlines() if n]
+
+    return {
+        "commits": commits,
+        "branches": names("refs/heads"),
+        "tags": names("refs/tags"),
+    }
+
+
+def collect_git(
     repo_path: str | os.PathLike[str],
     ref_a: Optional[str] = None,
     ref_b: Optional[str] = None,
@@ -250,8 +356,7 @@ def export_git(
     paths: Optional[Sequence[str]] = None,
     staged: bool = False,
     working_tree: bool = False,
-) -> str:
-    """Return a Markdown diff for two commits or a working/staged tree and HEAD."""
+) -> Collected:
     if context < 0:
         raise DiffExportError("Context lines cannot be negative.")
     if staged and working_tree:
@@ -324,15 +429,32 @@ def export_git(
                 added=added,
                 removed=removed,
                 binary=binary,
+                key_path=new_path,
             )
         )
 
-    return _build_markdown(
-        "git",
-        description,
-        changes,
-        context,
+    if staged or working_tree:
+        label = "{}_{}_vs_HEAD".format(repo.name, "staged" if staged else "working")
+    else:
+        label = "{}_{}..{}".format(repo.name, short_a, short_b)
+    return Collected("git", description, label, changes, context)
+
+
+def export_git(
+    repo_path: str | os.PathLike[str],
+    ref_a: Optional[str] = None,
+    ref_b: Optional[str] = None,
+    context: int = 3,
+    paths: Optional[Sequence[str]] = None,
+    staged: bool = False,
+    working_tree: bool = False,
+    exclude: Sequence[str] = (),
+) -> str:
+    """Return a Markdown diff for two commits or a working/staged tree and HEAD."""
+    collected = collect_git(
+        repo_path, ref_a, ref_b, context, paths, staged, working_tree
     )
+    return render_collected(collected, exclude)
 
 
 def _write_output(content: str, output: Optional[str]) -> None:
@@ -363,9 +485,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     git_parser.add_argument("--working-tree", action="store_true")
     git_parser.add_argument("--context", type=int, default=3)
     git_parser.add_argument("--path", action="append", dest="paths")
+    git_parser.add_argument("--exclude", action="append", default=[], help="Glob to leave out (repeatable).")
     git_parser.add_argument("--output", "-o")
 
+    serve_parser = subparsers.add_parser("serve", help="Start the local web UI and open it.")
+    serve_parser.add_argument("--port", type=int, default=8765, help="Port on 127.0.0.1 (0 = any free port).")
+    serve_parser.add_argument("--out-dir", help="Default output folder (default: ./out).")
+    serve_parser.add_argument("--no-browser", action="store_true")
+
     args = parser.parse_args(argv)
+    if args.command == "serve":
+        from llm_diff_web import serve
+
+        return serve(args.port, args.out_dir, open_browser=not args.no_browser)
     try:
         if args.command == "files":
             content = export_files(args.file_a, args.file_b, args.context)
@@ -380,6 +512,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 paths=args.paths,
                 staged=args.staged,
                 working_tree=args.working_tree,
+                exclude=args.exclude,
             )
         _write_output(content, args.output)
     except DiffExportError as exc:

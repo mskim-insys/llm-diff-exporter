@@ -1,6 +1,6 @@
 # Spec: llm-diff-exporter
 Status: active
-Last updated: 2026-11-18
+Last updated: 2026-11-19
 
 ## Goal
 A local tool with a rough web UI. The user picks what to compare, and the tool saves the result as a single file in a form an LLM reads easily, so the user can attach it to a chat right away. The overriding priority is a fast, low-effort implementation: reuse existing libraries and the system `git` CLI rather than writing diff logic. A polished UI is not a goal.
@@ -61,10 +61,10 @@ A single command to start the tool and open the page is the target. Avoid a buil
 - [x] Git mode supports working tree vs HEAD and staged vs HEAD.
 - [x] File mode exports the diff of two arbitrary text files.
 - [x] The output file has the header, summary, and per-file diff sections defined in R2, and renders correctly in Markdown even when the diff contains triple backticks.
-- [ ] The UI shows the size and estimated token count before download.
+- [x] The UI shows the size and estimated token count before download.
 - [x] Paths with spaces, non-ASCII names, and CRLF files work on Windows.
-- [ ] The server listens on `127.0.0.1` only, and no outbound network call is made.
-- [ ] The tool starts with one documented command, and `README.md` explains usage.
+- [x] The server listens on `127.0.0.1` only, and no outbound network call is made.
+- [x] The tool starts with one documented command, and `README.md` explains usage.
 - [x] Automated tests cover the export logic for both modes (using small fixture repos/files created by the tests).
 
 ## Milestones

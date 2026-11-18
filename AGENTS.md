@@ -16,7 +16,7 @@ A small local tool for one user (Windows). A rough web UI lets the user pick wha
 - Build: No build step (Python standard library only).
 - Test: `uv run python -m unittest discover -s tests`
 - Run: `uv run python -m llm_diff_exporter --help`
-- Run: `<fill in after the stack is chosen>`
+- Run (web UI, one command): `uv run python -m llm_diff_exporter serve`
 
 ## Boundaries
 - Do not send file or diff contents anywhere off this machine (no network calls, no telemetry, no LLM API calls). The tool only produces a file.
