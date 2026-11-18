@@ -99,3 +99,7 @@ venv.bak/
 
 # Archive
 archive/
+
+# Output
+out/
+*.diff

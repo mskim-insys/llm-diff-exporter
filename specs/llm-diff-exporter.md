@@ -35,6 +35,8 @@ The file must make sense to an LLM that has never seen the repo. Rules:
 ### R5. Reduce noise (small, optional options)
 - Exclude patterns for lockfiles and generated files (default list is editable), and a per-file checkbox to leave a file out before exporting.
 
+### R6. CLI with the same two modes and the same output file as the web UI
+
 ## Constraints
 - Runs locally on Windows only; no server deployment, no authentication, no accounts.
 - Fully offline: no network calls, no API keys, no telemetry.
