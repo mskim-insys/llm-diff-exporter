@@ -11,3 +11,9 @@
 - Decision: Use explicit path text fields in the future UI, with server-side validation. M1 accepts paths directly in its CLI.
 - Alternatives considered and rejected: Uploading files avoids path entry but adds upload handling and duplicates files; a server-side browser is more UI work than needed for a single-user local tool.
 - Impact / follow-ups: M2 must validate entered paths and keep the server bound to `127.0.0.1`.
+
+## 2026-11-19-01 Include untracked working-tree files
+- Context: Working tree vs HEAD should also show newly created, non-ignored files; the user approved this small output change.
+- Decision: List untracked regular files after tracked changes, generating text diffs with `difflib`. List binary files without bodies and files over 1 MiB as omitted; skip symlinks and non-regular files.
+- Alternatives considered and rejected: Omitting untracked files hides new work; staging intent-to-add would modify the index and violate the read-only constraint.
+- Impact / follow-ups: Git's ignore rules, path filters, exclusions, and per-file selection apply. Staged and ref comparisons remain unchanged; the index is not modified.

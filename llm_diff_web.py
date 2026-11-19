@@ -268,12 +268,18 @@ input[type=text],textarea,select{width:100%;box-sizing:border-box}
 <label>Exclude patterns (one glob per line) <textarea id="patterns" rows="5"></textarea></label>
 <label>Output folder <input type="text" id="out_dir"></label></fieldset>
 
-<button id="preview">Preview</button> <button id="export">Export (download + save)</button>
-<p id="error"></p><p id="size"></p><p id="saved" class="ok"></p>
+<button id="preview">Preview</button> <button id="export" disabled>Export (download + save)</button>
+<p id="error"></p><p id="stale"></p><p id="size"></p><p id="saved" class="ok"></p>
 <div id="files"></div>
 <script>
 const $ = id => document.getElementById(id);
 const mode = () => document.querySelector('input[name=mode]:checked').value;
+let previewGeneration = 0;
+function markStale() {
+  previewGeneration++;
+  $('export').disabled = true;
+  $('stale').textContent = 'Inputs changed: click Preview first';
+}
 async function api(name, body) {
   const r = await fetch('/api/' + name, {method: 'POST',
     headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
@@ -297,17 +303,22 @@ async function run(fn) {
   try { await fn(); } catch (e) { $('error').textContent = e.message; }
 }
 async function preview(fresh) {
+  const generation = ++previewGeneration;
+  if (fresh) $('export').disabled = true;
   const d = await api('preview', request(fresh));
+  if (generation !== previewGeneration) return;
   show(d);
   if (fresh) {
     const box = $('files'); box.textContent = '';
     d.files.forEach(f => {
       const l = document.createElement('label'), c = document.createElement('input');
       c.type = 'checkbox'; c.value = f.path; c.checked = !f.excluded;
-      c.onchange = () => run(() => preview(false));
+      c.onchange = () => { if (!$('export').disabled) run(() => preview(false)); };
       l.append(c, ' ' + f.path + ' [' + f.status + ', +' + f.added + ' -' + f.removed + ']');
       box.append(l);
     });
+    $('stale').textContent = '';
+    $('export').disabled = false;
   }
   if (mode() === 'git') remember($('repo').value);
 }
@@ -329,6 +340,8 @@ function sync() {
 }
 document.querySelectorAll('input[name=mode]').forEach(e => e.onchange = sync);
 $('kind').onchange = sync;
+document.querySelectorAll('input[name=mode], #kind, #repo, #ref_a, #ref_b, #paths, #file_a, #file_b, #context, #patterns')
+  .forEach(e => { e.addEventListener('input', markStale); e.addEventListener('change', markStale); });
 $('load').onclick = () => run(async () => {
   const d = await api('refs', {repo: $('repo').value});
   $('refs').textContent = '';
@@ -341,13 +354,14 @@ $('load').onclick = () => run(async () => {
       const o = document.createElement('option'); o.value = c.hash;
       o.textContent = c.short + ' ' + c.date + ' ' + c.subject; s.append(o);
     });
-    s.onchange = () => { if (s.value) $(id === 'pickA' ? 'ref_a' : 'ref_b').value = s.value; };
+    s.onchange = () => {
+      if (s.value) { $(id === 'pickA' ? 'ref_a' : 'ref_b').value = s.value; markStale(); }
+    };
   });
   remember($('repo').value);
 });
 $('preview').onclick = () => run(() => preview(true));
 $('export').onclick = () => run(async () => {
-  if (!$('files').children.length) await preview(true);
   const d = await api('export', request(false));
   show(d);
   const a = document.createElement('a');

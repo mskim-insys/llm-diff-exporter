@@ -11,7 +11,7 @@ uv run python -m llm_diff_exporter serve
 
 Options: `--port N` (default 8765, `0` = any free port), `--out-dir PATH`, `--no-browser`. Stop with Ctrl+C.
 
-In the page, choose **Git** (enter the repository folder, click *Load commits / branches*, then pick refs or type any ref/hash; or compare working tree / staged against HEAD) or **Two files** (enter both paths; quotes from "Copy as path" are accepted). *Preview* lists the changed files with their size in characters and estimated tokens; untick a file to leave it out (size updates). Exclude patterns (one glob per line, defaults cover lockfiles, `*.min.js`, `*.map`) are applied at preview. *Export* downloads the Markdown and saves a copy to the output folder (default `out/` in the current directory, git-ignored; folders inside the compared repository are refused). Recently used repository paths are remembered in the browser only.
+In the page, choose **Git** (enter the repository folder, click *Load commits / branches*, then pick refs or type any ref/hash; or compare working tree / staged against HEAD) or **Two files** (enter both paths; quotes from "Copy as path" are accepted). *Preview* lists the changed files with their size in characters and estimated tokens; untick a file to leave it out (size updates). Exclude patterns (one glob per line, defaults cover lockfiles, `*.min.js`, `*.map`) are applied at preview. After changing comparison inputs or patterns, run Preview again before exporting. *Export* downloads the Markdown and saves a copy to the output folder (default `out/` in the current directory, git-ignored; folders inside the compared repository are refused). Recently used repository paths are remembered in the browser only.
 
 The M1 command-line exporter also works without the UI. It writes Markdown to stdout unless `--output` is supplied.
 
@@ -36,3 +36,5 @@ Use `--context N` to change the default three context lines, repeat `--path PATH
 
 ## Current behavior and limits
 Export core, CLI, and the local web UI are implemented. The server accepts only `127.0.0.1`/`localhost` Host and Origin headers, makes no outbound network calls, and only reads the compared inputs (it writes only to the output folder). Output is Markdown only; there is no plain `.diff` option and no folder-vs-folder or merge support.
+
+Working tree vs HEAD includes staged and unstaged tracked changes, plus untracked files that Git does not ignore. Untracked regular files over 1 MiB (1,048,576 bytes) are listed as omitted without a diff; symlinks and other non-regular files are skipped. Path filters, exclude patterns, and per-file selection also apply to untracked files. Staged vs HEAD and ref comparisons do not include untracked files. In file mode and for untracked files, a NUL in the first 8,000 bytes marks a file as binary.

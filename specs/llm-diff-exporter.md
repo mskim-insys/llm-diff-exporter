@@ -35,7 +35,11 @@ The file must make sense to an LLM that has never seen the repo. Rules:
 ### R5. Reduce noise (small, optional options)
 - Exclude patterns for lockfiles and generated files (default list is editable), and a per-file checkbox to leave a file out before exporting.
 
-### R6. CLI with the same two modes and the same output file as the web UI
+### R6. Command-line interface
+- Provide `files <file-a> <file-b>` and `git <repo> [<ref-a> <ref-b>]` commands for the same file and Git comparisons as the web UI.
+- Git mode also accepts `--working-tree` or `--staged` instead of refs, plus `--context`, repeatable `--path`, and repeatable `--exclude` options.
+- Write the same Markdown export as the web UI to standard output by default, or to a file selected with `-o` / `--output`.
+- Report invalid arguments and comparison errors rather than producing a successful-looking export.
 
 ## Constraints
 - Runs locally on Windows only; no server deployment, no authentication, no accounts.
@@ -68,6 +72,8 @@ A single command to start the tool and open the page is the target. Avoid a buil
 - [x] The server listens on `127.0.0.1` only, and no outbound network call is made.
 - [x] The tool starts with one documented command, and `README.md` explains usage.
 - [x] Automated tests cover the export logic for both modes (using small fixture repos/files created by the tests).
+- [x] The CLI supports file comparisons and Git ref, working-tree, and staged comparisons.
+- [x] CLI output is the same Markdown as the corresponding export function and can be written to a selected output file.
 
 ## Milestones
 ### M1 Export core

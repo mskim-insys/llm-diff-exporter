@@ -7,6 +7,7 @@ import difflib
 import fnmatch
 import os
 import re
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -30,11 +31,15 @@ class FileChange:
     key_path: str = ""
 
 
-def _read_text(path: Path) -> str:
+def _read_bytes(path: Path) -> bytes:
     try:
-        return path.read_bytes().decode("utf-8", errors="replace")
+        return path.read_bytes()
     except OSError as exc:
         raise DiffExportError("Cannot read {}: {}".format(path, exc)) from exc
+
+
+def _is_binary(data: bytes) -> bool:
+    return b"\0" in data[:8000]
 
 
 def _line_counts(diff: str) -> tuple[int, int]:
@@ -146,7 +151,7 @@ def _build_markdown(
 
     sections = []
     for change in changes:
-        if change.binary:
+        if change.binary or change.status == "omitted (too large)":
             continue
         longest_run = max(
             (len(run) for run in re.findall(r"`+", change.diff)),
@@ -201,8 +206,11 @@ def collect_files(
         raise DiffExportError("Context lines cannot be negative.")
     path_a = Path(file_a)
     path_b = Path(file_b)
-    text_a = _read_text(path_a)
-    text_b = _read_text(path_b)
+    data_a = _read_bytes(path_a)
+    data_b = _read_bytes(path_b)
+    binary = _is_binary(data_a) or _is_binary(data_b)
+    text_a = data_a.decode("utf-8", errors="replace")
+    text_b = data_b.decode("utf-8", errors="replace")
     diff = "".join(
         difflib.unified_diff(
             text_a.splitlines(keepends=True),
@@ -210,22 +218,23 @@ def collect_files(
             fromfile="a/{}".format(path_a.name),
             tofile="b/{}".format(path_b.name),
             n=context,
-        )
+        ) if not binary else ""
     )
     added, removed = _line_counts(diff)
     change = FileChange(
         path="{} → {}".format(path_a.name, path_b.name),
-        status="modified" if diff else "unchanged",
+        status="binary" if binary else ("modified" if diff else "unchanged"),
         diff=diff,
         added=added,
         removed=removed,
+        binary=binary,
         key_path=path_b.name,
     )
     return Collected(
         "files",
         "{} and {}".format(path_a, path_b),
         "{}_{}".format(path_a.stem, path_b.stem),
-        [change] if diff else [],
+        [change] if diff or binary else [],
         context,
     )
 
@@ -314,8 +323,10 @@ def _git_diff_args(
     args = ["diff", "--no-ext-diff", "--no-color", "--unified={}".format(context)]
     if staged:
         args.append("--cached")
-    if ref_a is not None and ref_b is not None:
-        args.extend([ref_a, ref_b])
+    if ref_a is not None:
+        args.append(ref_a)
+    if ref_b is not None:
+        args.append(ref_b)
     args.append("--find-renames")
     if output_format in ("--name-status", "--numstat"):
         args.append("-z")
@@ -376,6 +387,8 @@ def collect_git(
         right_ref = "staged changes" if staged else "working tree"
         right_commit = None
         description = "{}: {} vs {}".format(repo, right_ref, left_ref)
+        if working_tree:
+            description += " (including untracked files)"
     else:
         requested_a = ref_a or "HEAD"
         requested_b = ref_b or "HEAD"
@@ -389,8 +402,8 @@ def collect_git(
     numstat_args = _git_diff_args(left_commit, right_commit, staged, context, "--numstat")
     selected_paths = list(paths or [])
     if selected_paths:
-        name_args.extend(selected_paths)
-        numstat_args.extend(selected_paths)
+        name_args.extend(["--"] + selected_paths)
+        numstat_args.extend(["--"] + selected_paths)
     named_changes = _parse_name_status(_git(repo, name_args))
     numstats = _parse_numstat(_git(repo, numstat_args))
 
@@ -432,6 +445,41 @@ def collect_git(
                 key_path=new_path,
             )
         )
+
+    if working_tree:
+        args = ["ls-files", "--others", "--exclude-standard", "-z"]
+        if selected_paths:
+            args.extend(["--"] + selected_paths)
+        untracked = _git(repo, args).decode("utf-8", errors="replace").split("\0")
+        for name in filter(None, untracked):
+            path = repo / name
+            try:
+                info = path.lstat()
+                if not stat.S_ISREG(info.st_mode):
+                    continue
+                if info.st_size > 1024 * 1024:
+                    changes.append(FileChange(name, "omitted (too large)", "", 0, 0))
+                    continue
+                with path.open("rb") as stream:
+                    data = stream.read(1024 * 1024 + 1)
+            except OSError as exc:
+                raise DiffExportError("Cannot read {}: {}".format(path, exc)) from exc
+            if len(data) > 1024 * 1024:
+                changes.append(FileChange(name, "omitted (too large)", "", 0, 0))
+                continue
+            binary = _is_binary(data)
+            diff = "" if binary else "".join(difflib.unified_diff(
+                [],
+                data.decode("utf-8", errors="replace").splitlines(keepends=True),
+                fromfile="/dev/null",
+                tofile="b/{}".format(name),
+                n=context,
+            ))
+            added, removed = _line_counts(diff)
+            changes.append(FileChange(
+                name, "binary" if binary else "added (untracked)",
+                diff, added, removed, binary=binary,
+            ))
 
     if staged or working_tree:
         label = "{}_{}_vs_HEAD".format(repo.name, "staged" if staged else "working")

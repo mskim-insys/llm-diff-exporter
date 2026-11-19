@@ -1,13 +1,45 @@
+import os
 import re
+import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from llm_diff_exporter import export_files, export_git
+from llm_diff_exporter import collect_git, export_files, export_git
 
 
 class ExportFilesTests(unittest.TestCase):
+    def test_binary_file_is_listed_without_diff_body(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path_a = root / "a"
+            path_b = root / "b"
+            path_a.write_bytes(b"hello\n")
+            path_b.write_bytes(b"hello\x00world\n")
+            output = export_files(path_a, path_b)
+
+        self.assertIn("a → b` — binary", output)
+        self.assertIn("Binary files are listed above", output)
+        self.assertNotIn("```diff", output)
+
+    def test_file_cli_writes_markdown_to_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path_a = root / "a.txt"
+            path_b = root / "b.txt"
+            output_path = root / "result.md"
+            path_a.write_bytes(b"before\n")
+            path_b.write_bytes(b"after\n")
+            subprocess.check_call([
+                sys.executable, "-m", "llm_diff_exporter", "files",
+                str(path_a), str(path_b), "-o", str(output_path),
+            ])
+            output = output_path.read_text(encoding="utf-8")
+            self.assertEqual(output, export_files(path_a, path_b))
+
     def test_file_diff_handles_crlf_and_fence_longer_than_backtick_run(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -84,6 +116,128 @@ class ExportGitTests(unittest.TestCase):
         staged = export_git(self.repo, staged=True)
         self.assertIn("staged changes vs HEAD", staged)
         self.assertIn("+working", staged)
+
+    def test_working_tree_includes_staged_and_unstaged_while_staged_does_not(self):
+        (self.repo / "keep.txt").write_text("staged\n", encoding="utf-8")
+        self._git("add", "keep.txt")
+        (self.repo / "added-추가.txt").write_text("unstaged\n", encoding="utf-8")
+        (self.repo / "untracked.txt").write_text("untracked\n", encoding="utf-8")
+
+        working = export_git(self.repo, working_tree=True)
+        staged = export_git(self.repo, staged=True)
+        self.assertIn("keep.txt` — modified", working)
+        self.assertIn("+staged", working)
+        self.assertIn("added-추가.txt` — modified", working)
+        self.assertIn("+unstaged", working)
+        self.assertIn("Lines added: 3", working)
+        self.assertIn("keep.txt` — modified", staged)
+        self.assertNotIn("added-추가.txt", staged)
+        self.assertNotIn("untracked.txt", staged)
+
+    def test_working_tree_combines_staged_and_later_edits_against_head(self):
+        (self.repo / "keep.txt").write_text("one\ntwo\nstaged\n", encoding="utf-8")
+        self._git("add", "keep.txt")
+        (self.repo / "keep.txt").write_text("one\ntwo\nstaged\nlater\n", encoding="utf-8")
+        working = export_git(self.repo, working_tree=True)
+        self.assertIn("+staged", working)
+        self.assertIn("+later", working)
+        self.assertIn("Lines added: 2", working)
+
+    def test_path_filter_does_not_interpret_git_options(self):
+        (self.repo / "keep.txt").write_text("changed\n", encoding="utf-8")
+        (self.repo / "added-추가.txt").write_text("changed\n", encoding="utf-8")
+        (self.repo / "새 tracked.txt").write_text("added\n", encoding="utf-8")
+        self._git("add", "새 tracked.txt")
+        pwned = Path(self.temporary.name) / "pwned.txt"
+        export_git(self.repo, working_tree=True, paths=["--output=" + str(pwned)])
+        self.assertFalse(pwned.exists())
+        filtered = export_git(self.repo, working_tree=True, paths=["keep.txt"])
+        self.assertIn("keep.txt` — modified", filtered)
+        self.assertNotIn("added-추가.txt", filtered)
+        filtered = export_git(self.repo, working_tree=True, paths=["새 tracked.txt"])
+        self.assertIn("새 tracked.txt` — added", filtered)
+        self.assertNotIn("keep.txt", filtered)
+
+    def test_untracked_files_are_filtered_limited_and_leave_index_unchanged(self):
+        (self.repo / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+        (self.repo / "ignored.txt").write_text("ignored\n", encoding="utf-8")
+        (self.repo / "새 file.txt").write_text("first\nsecond\n", encoding="utf-8")
+        (self.repo / "binary-new.bin").write_bytes(b"binary\x00data")
+        (self.repo / "big.txt").write_bytes(b"x" * (1024 * 1024 + 1))
+        (self.repo / "keep.txt").write_text("staged\n", encoding="utf-8")
+        self._git("add", "keep.txt")
+        status_before = self._git("status", "--porcelain")
+        index_before = self._git("diff", "--cached")
+
+        output = export_git(self.repo, working_tree=True)
+        self.assertIn("새 file.txt` — added (untracked)", output)
+        self.assertIn("--- /dev/null\n+++ b/새 file.txt", output)
+        self.assertIn("+first\n+second", output.replace("\r\n", "\n"))
+        self.assertIn("binary-new.bin` — binary", output)
+        self.assertNotIn("## binary-new.bin", output)
+        self.assertIn("big.txt` — omitted (too large)", output)
+        self.assertNotIn("## big.txt", output)
+        self.assertNotIn("`ignored.txt`", output)
+        self.assertNotIn("## ignored.txt", output)
+        self.assertEqual(self._git("status", "--porcelain"), status_before)
+        self.assertEqual(self._git("diff", "--cached"), index_before)
+        filtered = export_git(self.repo, working_tree=True, paths=["새 file.txt"])
+        self.assertIn("Lines added: 2", filtered)
+        self.assertIn("새 file.txt` — added (untracked)", filtered)
+        self.assertNotIn("big.txt", filtered)
+        excluded = export_git(self.repo, working_tree=True, exclude=["새*"])
+        self.assertIn("Excluded from this export: `새 file.txt`", excluded)
+        self.assertNotIn("## 새 file.txt", excluded)
+
+    def test_untracked_size_limit_includes_exactly_one_mib(self):
+        (self.repo / "limit.txt").write_bytes(b"x" * (1024 * 1024))
+        changes = collect_git(self.repo, working_tree=True).changes
+        self.assertEqual(changes[0].status, "added (untracked)")
+        self.assertEqual(changes[0].added, 1)
+
+    def test_untracked_symlink_is_skipped(self):
+        link = self.repo / "link.txt"
+        try:
+            link.symlink_to(self.repo / "keep.txt")
+        except OSError as exc:
+            self.skipTest("Cannot create symlink: {}".format(exc))
+        output = export_git(self.repo, working_tree=True)
+        self.assertNotIn("`link.txt`", output)
+
+    def test_untracked_non_regular_entry_is_skipped(self):
+        path = self.repo / "not-regular.txt"
+        path.write_text("content\n", encoding="utf-8")
+        original_lstat = Path.lstat
+
+        def fake_lstat(candidate):
+            if candidate == path:
+                return os.stat_result((stat.S_IFLNK,) + (0,) * 9)
+            return original_lstat(candidate)
+
+        with patch.object(Path, "lstat", fake_lstat):
+            output = export_git(self.repo, working_tree=True)
+        self.assertNotIn("`not-regular.txt`", output)
+
+    def test_git_cli_working_tree_includes_staged_and_unstaged(self):
+        (self.repo / "keep.txt").write_text("staged\n", encoding="utf-8")
+        self._git("add", "keep.txt")
+        (self.repo / "new name.txt").write_text("unstaged\n", encoding="utf-8")
+        output_path = Path(self.temporary.name) / "result.md"
+        subprocess.check_call([
+            sys.executable, "-m", "llm_diff_exporter", "git", str(self.repo),
+            "--working-tree", "-o", str(output_path),
+        ])
+        output = output_path.read_text(encoding="utf-8")
+        self.assertEqual(output, export_git(self.repo, working_tree=True))
+
+    def test_git_cli_ref_comparison_matches_export(self):
+        environment = os.environ.copy()
+        environment["PYTHONIOENCODING"] = "utf-8"
+        output = subprocess.check_output([
+            sys.executable, "-m", "llm_diff_exporter", "git", str(self.repo),
+            self.first, self.second,
+        ], encoding="utf-8", env=environment)
+        self.assertEqual(output, export_git(self.repo, self.first, self.second))
 
 
 if __name__ == "__main__":
