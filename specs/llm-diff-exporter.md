@@ -21,6 +21,7 @@ One output file per export. Default format is Markdown (`.md`); a plain `.diff`/
 The file must make sense to an LLM that has never seen the repo. Rules:
 - The code fence must be longer than any run of backticks inside the diff, so the Markdown never breaks.
 - Binary files are listed in the summary and skipped in the body, with a note.
+- Identical binary files in file mode are unchanged. The summary identifies files decoded as CP949 or UTF-16; UTF-8-only exports have no encoding note.
 - Show an approximate size (characters and an estimated token count) in the UI and in the header, so the user knows whether it fits a chat. A rough estimate (for example characters / 4) is enough.
 - Context lines are configurable, default 3.
 
@@ -39,6 +40,7 @@ The file must make sense to an LLM that has never seen the repo. Rules:
 - Provide `files <file-a> <file-b>` and `git <repo> [<ref-a> <ref-b>]` commands for the same file and Git comparisons as the web UI.
 - Git mode also accepts `--working-tree` or `--staged` instead of refs, plus `--context`, repeatable `--path`, and repeatable `--exclude` options.
 - Write the same Markdown export as the web UI to standard output by default, or to a file selected with `-o` / `--output`.
+- Encode CLI stdout and output files as UTF-8 without a BOM. Do not translate newlines when writing output; preserve CRLF inside diff bodies.
 - Report invalid arguments and comparison errors rather than producing a successful-looking export.
 
 ## Constraints
@@ -48,6 +50,7 @@ The file must make sense to an LLM that has never seen the repo. Rules:
 - Prefer the system `git` CLI (called without a shell, arguments passed as a list) for git mode, and an existing diff library for file mode, instead of a git library or custom diff code.
 - Prefer pure-JS/pure-Python dependencies. Avoid unsigned native binaries (Windows Smart App Control has blocked such tools on this machine).
 - Handle Windows paths with spaces and non-ASCII characters, CRLF line endings, and UTF-8 files (with a safe fallback for undecodable bytes).
+- Recognize UTF-8 and UTF-16 BOMs before binary detection; otherwise decode file content as strict UTF-8, then strict CP949, then UTF-8 with replacement. Decode Git patches line by line using the same fallback order.
 - Bind the web server to `127.0.0.1` only.
 
 ## Stack

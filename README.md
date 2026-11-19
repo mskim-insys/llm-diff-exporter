@@ -27,7 +27,7 @@ uv run python -m llm_diff_exporter git "C:\path\repo" --staged
 uv run python -m llm_diff_exporter git "C:\path\repo" --working-tree
 ```
 
-Use `--context N` to change the default three context lines, repeat `--path PATH` to restrict Git mode to repository-relative paths, and repeat `--exclude GLOB` to leave files out. `--help` lists all options. The output includes a summary, per-file unified diffs, and approximate character/token counts. Binary files are listed but omitted from diff sections. Invalid UTF-8 bytes in text files are replaced safely.
+Use `--context N` to change the default three context lines, repeat `--path PATH` to restrict Git mode to repository-relative paths, and repeat `--exclude GLOB` to leave files out. `--help` lists all options. The output includes a summary, per-file unified diffs, and approximate character/token counts. Binary files are listed but omitted from diff sections. Use `-o` or the web UI to save output: PowerShell 5.1's `>` redirection writes UTF-16.
 
 ## Build and run
 - Build: No build step; the implementation uses the Python standard library and system Git.
@@ -37,4 +37,6 @@ Use `--context N` to change the default three context lines, repeat `--path PATH
 ## Current behavior and limits
 Export core, CLI, and the local web UI are implemented. The server accepts only `127.0.0.1`/`localhost` Host and Origin headers, makes no outbound network calls, and only reads the compared inputs (it writes only to the output folder). Output is Markdown only; there is no plain `.diff` option and no folder-vs-folder or merge support.
 
-Working tree vs HEAD includes staged and unstaged tracked changes, plus untracked files that Git does not ignore. Untracked regular files over 1 MiB (1,048,576 bytes) are listed as omitted without a diff; symlinks and other non-regular files are skipped. Path filters, exclude patterns, and per-file selection also apply to untracked files. Staged vs HEAD and ref comparisons do not include untracked files. In file mode and for untracked files, a NUL in the first 8,000 bytes marks a file as binary.
+Working tree vs HEAD includes staged and unstaged tracked changes, plus untracked files that Git does not ignore. Untracked regular files over 1 MiB (1,048,576 bytes) are listed as omitted without a diff; symlinks and other non-regular files are skipped. Path filters, exclude patterns, and per-file selection also apply to untracked files. Staged vs HEAD and ref comparisons do not include untracked files.
+
+In file mode and for untracked files, UTF-8 and UTF-16 LE/BE BOMs are recognized and removed; otherwise text is decoded as strict UTF-8, then strict CP949, then UTF-8 with replacement characters as a fallback. The summary identifies files decoded as CP949 or UTF-16. Without a UTF-16 BOM, a NUL in the first 8,000 bytes marks a file as binary. Git patches are decoded line by line using UTF-8, CP949, then replacement, so UTF-8 paths can coexist with CP949 content. Git itself may classify tracked UTF-16 files as binary. Encoding detection is heuristic: bytes valid in both UTF-8 and CP949 are interpreted as UTF-8. Output files use UTF-8 without a BOM and do not translate newlines; diff bodies retain input CRLF line endings.

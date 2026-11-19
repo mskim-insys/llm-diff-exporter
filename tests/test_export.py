@@ -12,6 +12,129 @@ from llm_diff_exporter import collect_git, export_files, export_git
 
 
 class ExportFilesTests(unittest.TestCase):
+    def test_utf8_output_matches_existing_format(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path_a, path_b = root / "a", root / "b"
+            path_a.write_bytes(b"before\n")
+            path_b.write_bytes(b"after\n")
+            with patch("llm_diff_exporter.datetime") as clock:
+                clock.now.return_value.astimezone.return_value.date.return_value.isoformat.return_value = "2026-11-19"
+                output = export_files(path_a, path_b)
+            size = len(output)
+            expected = (
+                "# Diff export\n\n"
+                "- Mode: files\n"
+                "- Compared: {} and {}\n"
+                "- Generated: 2026-11-19\n"
+                "- Context lines: 3\n"
+                "- Approximate size: {} characters (~{} tokens)\n\n"
+                "## Summary\n\n"
+                "- Files changed: 1\n"
+                "- Lines added: 1\n"
+                "- Lines removed: 1\n\n"
+                "### Files\n"
+                "- `a → b` — modified\n\n"
+                "## a → b\n\n"
+                "```diff\n"
+                "--- a/a\n"
+                "+++ b/b\n"
+                "@@ -1 +1 @@\n"
+                "-before\n"
+                "+after\n"
+                "```\n"
+            ).format(path_a, path_b, size, (size + 3) // 4)
+        self.assertEqual(output, expected)
+
+    def test_output_file_preserves_crlf_in_diff_body(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path_a, path_b, output_path = root / "a", root / "b", root / "result.md"
+            path_a.write_bytes(b"before\r\n")
+            path_b.write_bytes(b"after\r\n")
+            subprocess.check_call([
+                sys.executable, "-m", "llm_diff_exporter", "files",
+                str(path_a), str(path_b), "-o", str(output_path),
+            ])
+            output = output_path.read_bytes()
+        self.assertFalse(output.startswith(b"\xef\xbb\xbf"))
+        self.assertIn(b"-before\r\n+after\r\n", output)
+        self.assertNotIn(b"\r\r\n", output)
+
+    def test_utf8_bom_is_stripped_and_output_is_unchanged(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path_a, path_b = root / "a", root / "b"
+            path_a.write_bytes(b"before\n")
+            path_b.write_bytes(b"after\n")
+            expected = export_files(path_a, path_b)
+            path_b.write_bytes(b"\xef\xbb\xbfafter\n")
+            output = export_files(path_a, path_b)
+        self.assertEqual(output, expected)
+        self.assertNotIn("\ufeff", output)
+        self.assertNotIn("Decoded as", output)
+
+    def test_utf16_bom_is_text_and_is_reported(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path_a, path_b = root / "a", root / "b"
+            path_a.write_bytes(b"before\n")
+            path_b.write_bytes(b"\xff\xfe" + "한글\n".encode("utf-16-le"))
+            output = export_files(path_a, path_b)
+        self.assertIn("+한글", output)
+        self.assertIn("Decoded as utf-16: `b`", output)
+        self.assertNotIn("— binary", output)
+        self.assertNotIn("\ufeff", output)
+
+    def test_cp949_is_decoded_and_reported(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path_a, path_b = root / "a", root / "b"
+            path_a.write_bytes(b"before\n")
+            path_b.write_bytes(b"\xc7\xd1\xb1\xdb\n")
+            output = export_files(path_a, path_b)
+        self.assertIn("+한글", output)
+        self.assertIn("Decoded as cp949: `b`", output)
+        self.assertNotIn("\ufffd", output)
+
+    def test_utf16_be_and_unrecognized_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path_a, path_b = root / "a", root / "b"
+            path_a.write_bytes(b"\xfe\xff" + "before\n".encode("utf-16-be"))
+            path_b.write_bytes(b"\xff\n")
+            output = export_files(path_a, path_b)
+        self.assertIn("-before", output)
+        self.assertIn("+\ufffd", output)
+        self.assertIn("Decoded as utf-16: `a`", output)
+        self.assertNotIn("Decoded as cp949", output)
+
+    def test_identical_binary_files_are_unchanged(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path_a, path_b = root / "a", root / "b"
+            path_a.write_bytes(b"\x00\x01")
+            path_b.write_bytes(b"\x00\x01")
+            output = export_files(path_a, path_b)
+        self.assertIn("- Files changed: 0", output)
+        self.assertNotIn("— binary", output)
+
+    def test_cli_stdout_is_utf8_with_cp949_environment(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path_a, path_b = root / "a", root / "b"
+            path_a.write_bytes(b"before\n")
+            path_b.write_bytes("한글\n".encode("utf-8"))
+            environment = os.environ.copy()
+            environment["PYTHONIOENCODING"] = "cp949"
+            result = subprocess.run(
+                [sys.executable, "-m", "llm_diff_exporter", "files", str(path_a), str(path_b)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("+한글", result.stdout.decode("utf-8"))
+        self.assertNotIn(b"\r\n", result.stdout)
+
     def test_binary_file_is_listed_without_diff_body(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -90,6 +213,30 @@ class ExportGitTests(unittest.TestCase):
 
     def _git(self, *args):
         return subprocess.check_output(["git"] + list(args), cwd=str(self.repo), text=True)
+
+    def test_tracked_cp949_with_utf8_korean_path(self):
+        path = self.repo / "한글.txt"
+        path.write_bytes(b"before\n")
+        self._git("add", path.name)
+        self._git("commit", "-qm", "add legacy")
+        path.write_bytes(b"\xc7\xd1\xb1\xdb\n")
+        output = export_git(self.repo, working_tree=True)
+        self.assertIn("diff --git a/한글.txt b/한글.txt", output)
+        self.assertIn("+한글", output)
+        self.assertIn("Decoded as cp949: `한글.txt`", output)
+        self.assertNotIn("\ufffd", output)
+        excluded = export_git(self.repo, working_tree=True, exclude=["한글.txt"])
+        self.assertNotIn("Decoded as", excluded)
+
+    def test_untracked_cp949_and_utf16(self):
+        (self.repo / "legacy.txt").write_bytes(b"\xc7\xd1\xb1\xdb\n")
+        (self.repo / "powershell.txt").write_bytes(b"\xff\xfe" + "한글\n".encode("utf-16-le"))
+        output = export_git(self.repo, working_tree=True)
+        self.assertIn("Decoded as cp949: `legacy.txt`", output)
+        self.assertIn("Decoded as utf-16: `powershell.txt`", output)
+        self.assertEqual(output.count("+한글"), 2)
+        self.assertNotIn("\ufffd", output)
+        self.assertNotIn("— binary", output)
 
     def test_commit_diff_reports_statuses_binary_and_safe_output(self):
         output = export_git(self.repo, self.first, self.second)

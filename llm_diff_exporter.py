@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import difflib
 import fnmatch
 import os
@@ -29,6 +30,7 @@ class FileChange:
     removed: int
     binary: bool = False
     key_path: str = ""
+    encodings: tuple[tuple[str, str], ...] = ()
 
 
 def _read_bytes(path: Path) -> bytes:
@@ -39,7 +41,20 @@ def _read_bytes(path: Path) -> bytes:
 
 
 def _is_binary(data: bytes) -> bool:
-    return b"\0" in data[:8000]
+    return not data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)) and b"\0" in data[:8000]
+
+
+def decode_text(data: bytes) -> tuple[str, str]:
+    if data.startswith(codecs.BOM_UTF8):
+        return data.decode("utf-8-sig", errors="replace"), "utf-8"
+    if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return data.decode("utf-16", errors="replace"), "utf-16"
+    for encoding in ("utf-8", "cp949"):
+        try:
+            return data.decode(encoding), encoding
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace"), "utf-8"
 
 
 def _line_counts(diff: str) -> tuple[int, int]:
@@ -140,6 +155,14 @@ def _build_markdown(
     ]
     for change in changes:
         summary.append("- `{}` — {}".format(_format_path(change.path), change.status))
+    for encoding in ("cp949", "utf-16"):
+        paths = dict.fromkeys(
+            path for change in changes for path, name in change.encodings if name == encoding
+        )
+        if paths:
+            summary.extend(["", "Decoded as {}: {}".format(
+                encoding, ", ".join("`{}`".format(_format_path(path)) for path in paths)
+            )])
     if any(change.binary for change in changes):
         summary.extend(["", "Binary files are listed above and omitted from the diff body."])
     if excluded:
@@ -209,8 +232,8 @@ def collect_files(
     data_a = _read_bytes(path_a)
     data_b = _read_bytes(path_b)
     binary = _is_binary(data_a) or _is_binary(data_b)
-    text_a = data_a.decode("utf-8", errors="replace")
-    text_b = data_b.decode("utf-8", errors="replace")
+    text_a, encoding_a = decode_text(data_a) if not binary else ("", "utf-8")
+    text_b, encoding_b = decode_text(data_b) if not binary else ("", "utf-8")
     diff = "".join(
         difflib.unified_diff(
             text_a.splitlines(keepends=True),
@@ -229,12 +252,16 @@ def collect_files(
         removed=removed,
         binary=binary,
         key_path=path_b.name,
+        encodings=tuple(
+            (path.name, encoding) for path, encoding in
+            ((path_a, encoding_a), (path_b, encoding_b)) if encoding != "utf-8"
+        ),
     )
     return Collected(
         "files",
         "{} and {}".format(path_a, path_b),
         "{}_{}".format(path_a.stem, path_b.stem),
-        [change] if diff or binary else [],
+        [change] if diff or (binary and data_a != data_b) else [],
         context,
     )
 
@@ -245,7 +272,7 @@ def export_files(
     context: int = 3,
     exclude: Sequence[str] = (),
 ) -> str:
-    """Return a Markdown diff for two UTF-8 text files."""
+    """Return a Markdown diff for two text or binary files."""
     return render_collected(collect_files(file_a, file_b, context), exclude)
 
 
@@ -433,7 +460,15 @@ def collect_git(
             "--",
         )
         diff_args.extend(file_paths)
-        diff = "" if binary else _git(repo, diff_args).decode("utf-8", errors="replace")
+        diff_lines = []
+        encodings = set()
+        if not binary:
+            for line in _git(repo, diff_args).splitlines(keepends=True):
+                decoded, encoding = decode_text(line)
+                diff_lines.append(decoded)
+                if encoding != "utf-8":
+                    encodings.add((new_path, encoding))
+        diff = "".join(diff_lines)
         changes.append(
             FileChange(
                 path=display_path,
@@ -443,6 +478,7 @@ def collect_git(
                 removed=removed,
                 binary=binary,
                 key_path=new_path,
+                encodings=tuple(sorted(encodings)),
             )
         )
 
@@ -468,9 +504,10 @@ def collect_git(
                 changes.append(FileChange(name, "omitted (too large)", "", 0, 0))
                 continue
             binary = _is_binary(data)
+            text, encoding = decode_text(data) if not binary else ("", "utf-8")
             diff = "" if binary else "".join(difflib.unified_diff(
                 [],
-                data.decode("utf-8", errors="replace").splitlines(keepends=True),
+                text.splitlines(keepends=True),
                 fromfile="/dev/null",
                 tofile="b/{}".format(name),
                 n=context,
@@ -479,6 +516,7 @@ def collect_git(
             changes.append(FileChange(
                 name, "binary" if binary else "added (untracked)",
                 diff, added, removed, binary=binary,
+                encodings=((name, encoding),) if encoding != "utf-8" else (),
             ))
 
     if staged or working_tree:
@@ -517,6 +555,7 @@ def _write_output(content: str, output: Optional[str]) -> None:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    sys.stdout.reconfigure(encoding="utf-8", newline="\n")
     parser = argparse.ArgumentParser(description="Export local diffs as LLM-friendly Markdown.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 

@@ -17,3 +17,9 @@
 - Decision: List untracked regular files after tracked changes, generating text diffs with `difflib`. List binary files without bodies and files over 1 MiB as omitted; skip symlinks and non-regular files.
 - Alternatives considered and rejected: Omitting untracked files hides new work; staging intent-to-add would modify the index and violate the read-only constraint.
 - Impact / follow-ups: Git's ignore rules, path filters, exclusions, and per-file selection apply. Staged and ref comparisons remain unchanged; the index is not modified.
+
+## 2026-11-19-02 Decode legacy text without dependencies
+- Context: Korean CP949 text and BOM-marked UTF-16 text were misread, and Git patches can mix UTF-8 paths with file content in another encoding.
+- Decision: Recognize UTF-8 and UTF-16 BOMs first, then try strict UTF-8, strict CP949, and finally UTF-8 with replacement. Decode Git patches line by line so CP949 content does not corrupt UTF-8 headers and paths. Report CP949 and UTF-16 files in the summary; write CLI stdout as UTF-8.
+- Alternatives considered and rejected: Chardet-style detection libraries add dependencies against the no-new-dependencies rule; decoding a whole Git patch with one codec cannot preserve mixed encodings.
+- Impact / follow-ups: Detection is heuristic and UTF-8 wins when bytes are valid in both encodings. Git can still classify tracked UTF-16 files as binary.
